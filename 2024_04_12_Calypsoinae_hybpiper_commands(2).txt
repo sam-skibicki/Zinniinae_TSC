@@ -1,0 +1,700 @@
+# Commands for running HybPiper and building ASTRAL trees
+
+#################
+
+```bash
+cd /data/cbarrett/2024_Calypsoinae
+
+
+## make a reads dir, and edit file names
+
+sudo mkdir reads
+sudo mv *.fastq.gz reads
+cd reads
+rename 's/_001.fastq.gz/.fastq.gz/g' *.fastq.gz
+rename 's/_L001//g' *.fastq.gz
+
+# make a clean reads dir and run FASTP (trim adapters, poly-X, low quality bases)
+
+sudo mkdir ../fastp_polyg
+
+for f1 in *_R1.fastq.gz
+	do
+        f2=${f1%%_R1.fastq.gz}"_R2.fastq.gz"
+        fastp -i $f1 -I $f2 -w 16 --trim_poly_g --trim_poly_x -l 75 --cut_right -o "../fastp_polyg/fastp-$f1" -O "../fastp_polyg/fastp-$f2"
+	done
+
+
+# make a namefile and edit with sed
+
+# output from ls command, saved to new text file
+ls *R1.fastq.gz > ../namelist.txt
+
+# sed replace "_R1.fastq" in namefile
+sed 's/_R1.fastq.gz//g' namelist.txt > namelist2.txt
+
+# check if everything is okay
+cat namelist2.txt
+
+# If needed, delete sample names from namelist if they have too few reads or failed in sequencing
+```
+
+#################
+
+# Run Hybpiper
+
+```bash
+## make an output directory and cd to it
+
+mkdir hybpiper_2024_01_08
+sudo chmod 777 -R hybpiper_2024_01_08
+cd hybpiper_2024_01_08
+
+## run the pipeline -- all the file locations are specified via relative paths below in the while loop
+
+conda activate hybpiper
+
+# [OLD Command, for hybpiper v 1]
+while read name 
+do python /usr/local/src/HybPiper/reads_first.py \
+  -b ../Angiosperms353_targetSequences.fasta \
+  -r ../fastp_polyg/"$name"_R*.fastq.gz \
+  --prefix $name \
+  --bwa
+done < ../namelist2.txt
+
+# Proper command for hybpiper2
+
+while read name; 
+ 
+do hybpiper assemble -t_dna ../Angiosperms353_targetSequences.fasta -r ../fastp_polyg/$name*.fastq.gz --prefix $name --bwa; 
+ 
+done < ../namelist3.txt
+
+conda deactivate
+
+```
+
+## Get stats
+
+```bash
+hybpiper stats -t_dna ../Angiosperms353_targetSequences.fasta gene ../namelist3.txt
+
+## Get heatmap pdf
+
+hybpiper recovery_heatmap seq_lengths.tsv --heatmap_filetype pdf --heatmap_dpi 1000
+
+```
+## Retrieve sequences, with "best" paralogs
+
+```bash
+hybpiper retrieve_sequences -t_dna ../Angiosperms353_targetSequences.fasta dna --sample_names ../namelist3.txt
+
+```
+## Retrieve sequences with all paralogs. 2 outputs dirs, paralogs_all and paralogs_no_chimeras (we want the second one)
+
+```bash
+hybpiper paralog_retriever ../namelist3.txt -t_dna ../Angiosperms353_targetSequences.fasta dna
+```
+
+## A little housekeeping
+
+```bash
+mkdir best_paralog
+sudo mv *.FNA best_paralog
+cd best_paralog
+```
+
+## alignments with mafft (auto)
+
+```bash
+for i in *.FNA; do
+mafft --adjustdirection --thread 32 ${i} > ${i%.*}_mafft.fasta;
+done
+
+```
+
+## Trim 'best_paralog' alignments, but first convert 'n' to '-'
+
+```bash
+mkdir seqkit 
+mkdir trimal
+
+parallel seqkit -is replace -p "n" -r "-" {} -o seqkit/{.}_seqkit.fasta ::: *.fasta 
+
+cd seqkit 
+
+parallel trimal -in {} -out ../trimal/{.}_trim.fasta -htmlout ../trimal/{.}_trim.html -automated1 ::: *_seqkit.fasta
+
+cd ../trimal
+mkdir html
+sudo mv *.html html
+
+```
+
+## Trim 'paralogs_no_chimeras' alignments, but first convert 'n' to '-'
+
+```bash
+
+cd paralogs_no_chimeras
+mkdir seqkit_paralogs 
+mkdir trimal_paralogs
+
+## alignments with mafft (auto)
+
+for i in *.fasta; do
+mafft --adjustdirection --thread 32 ${i} > ${i%.*}_mafft.fasta;
+done
+
+parallel seqkit -is replace -p "n" -r "-" {} -o seqkit_paralogs/{.}_seqkit.fasta ::: *_mafft.fasta 
+
+cd seqkit_paralogs
+
+parallel trimal -in {} -out ../trimal_paralogs/{.}_trim.fasta -htmlout ../trimal_paralogs/{.}_trim.html -automated1 ::: *_seqkit.fasta
+
+cd ../trimal_paralogs
+mkdir html
+sudo mv *.html html
+
+```
+
+
+# Build trees
+
+## Do some additional filtering (need to automate this)
+
+## Pulled all 'trimal' files into Geneious, sort by # sequences
+
+## Remove all alignments with < 10 sequences, then sort by length
+
+## remove all alignments with < 100 positions, export, pull into new dir called 'trimal_geneious'
+
+```bash
+cd best_paralog/trimal
+
+## Need to remove '_R_' from fasta headers, stuck there from mafft *reversed sequences)
+
+sed -i 's/_R_//g' *_trim.fasta
+
+## remove paralog tags (.0, .1, .2, etc.) so all paralog leaves have identical names, as required by Astral-pro
+sed 's/.main//g' < treeshrink_paralogs_output.tre | sed 's/\.\d:/:/g' > treeshrink_iqtree_paralogs2.treefile
+cd ..
+
+iqtree2 -S trimal_geneious --prefix iqtree_bestparalog -m GTR+G+I -T 32
+
+## Run TreeShrink to remove spurious branches
+
+python3 /usr/local/src/TreeShrink-1.3.8b/run_treeshrink.py -t iqtree_bestparalog.treefile > treeshrink_bestparalog.log
+```
+
+# Remove '.main' '.0' '.1' annotation in paralogs for ASTER/A-Pro
+
+```bash
+iqtree2 -S Trimal_paralogs_geneious --prefix iqtree_allparalogs -m GTR+G+I -B 1000 -T 32
+
+python3 /usr/local/src/TreeShrink-1.3.8b/run_treeshrink.py -t iqtree_allparalogs.treefile > treeshrink_allparalogs.log
+
+sed 's/.main//g' < treeshrink_allparalogs_output.treefile | sed 's/\.\d:/:/g' > treeshrink_iqtree_allparalogs2.treefile
+
+```
+
+# Reroot all trees
+
+```bash
+
+nano outgroup.list  ## fastp-Brassavola-glauca_S40
+
+python /data/cbarrett/hybpiper_test/reroot_trees.py iqtree_bestparalog_treeshrink/bestparalog_treeshrink_output.treefile outgroup.list > rerooted_bestparalog.treefile  
+
+```
+
+# Run TreeShrink to remove spurious long branches
+
+```bash
+ssh username@ssh.wvu.edu
+ssh cfb0001@tf.hpc.wvu.edu
+
+# Activate conda
+source /shared/software/conda/conda_init.sh
+
+conda create -n treeshrink
+conda activate treeshrink
+conda install -c smirarab treeshrink
+
+# problems with R and python! Don't use the conda distro
+
+conda deactivate 
+
+# Use an old version with scipy instead of R. This worked!
+
+wget https://github.com/uym2/TreeShrink/archive/refs/tags/v1.3.8b.tar.gz
+
+tar -xvzf v1.3.8b.tar.gz
+
+cd TreeShrink-1.3.8b/
+
+sudo python setup.py install
+
+python3 /usr/local/src/TreeShrink-1.3.8b/run_treeshrink.py -t /data/cbarrett/2024_Calypsoinae/hybpiper_2024_01_08/rerooted2.treefile
+```
+
+# Run phyparts for quartets
+
+```bash
+
+java -jar /usr/local/bin/phyparts/target/phyparts-0.0.1-SNAPSHOT-jar-with-dependencies.jar -a 1 -v -d iqtree_bestparalog.treefile -m bestparalog_astral.tre -o bestparalog_file_phyparts
+
+# Plot pie charts on tree
+
+python /data/cbarrett/2024_Calypsoinae/hybpiper_2024_01_08/2023_old_analyses/phypartspiecharts.py bestparalog_astral.tre bestparalog_file_phyparts 232 --svg_name bestparalog_piechart_tree.svg
+
+# conduct gene and site concordance factor analyses
+iqtree2 -t inferred_species_tree4_rooted.tre -s calypsoinae_all.nex --gcf rerooted2_fixed.tre --scf 10000 --prefix concord_astraltree -T 28
+
+```
+
+## Concordance factors in IQtree
+
+```bash
+iqtree -t bestparalog_astral.tre --gcf bestparalog_treeshrink_output.treefile -s Concatenated_alignments_bestparalog.fasta --scf 10000 --prefix concord_bestparalog
+```
+
+## Visualize by plotting gCF vs sCF (gene and site concordance factors)
+
+```{r}
+
+library(viridis)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(GGally)
+library(entropy)
+
+# read the data
+d = read.delim("concord.cf.stat", header = T, comment.char=‘#')
+               
+
+# plot the values
+ggplot(d, aes(x = gCF, y = sCF)) + 
+    geom_point(aes(colour = Label)) + 
+    scale_colour_viridis(direction = -1) + 
+    xlim(0, 100) +
+    ylim(0, 100) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+    geom_text_repel()
+	
+plot(ladderize(tre))
+nodelabels(frame="none")  ## To reference the node numbers
+```
+
+## More exploration of concordance factors (http://www.robertlanfear.com/blog/files/concordance_factors.html)
+
+```{r}
+
+### conduct a chi-square test for deviation from the expectations under ILS
+### Expectation is gCF > gDF1 ~= gDF2. If gDF1 is >> gDF2, this *may* suggest gene flow, or something else not expected under the ILS model
+### Can do the same for sCF, sDF1, sDF2, but this doesn't account for LD within loci. Not relaible and may be biased.
+
+### Set up the chi2 test:
+
+chisq = function(DF1, DF2, N){
+    tryCatch({
+        # converts percentages to counts, runs chisq, gets pvalue
+        chisq.test(c(round(DF1*N)/100, round(DF2*N)/100))$p.value
+    },
+    error = function(err) {
+        # errors come if you give chisq two zeros
+        # but here we're sure that there's no difference
+        return(1.0)
+    })
+}
+
+e = d %>% 
+    group_by(ID) %>%
+    mutate(gEF_p = chisq(gDF1, gDF2, gN)) %>%
+    mutate(sEF_p = chisq(sDF1, sDF2, sN))
+
+### new columns in the 'e' tibble, p-values for the gCF chi2 test
+
+### Find all significant p-values. Only care about the significant values for gene tree concordance!
+
+subset(data.frame(e), (gEF_p < 0.05 | sEF_p < 0.05))
+
+### Check which nodes significantly deviate from ILS assumptions
+
+```
+
+### R commands to plot and compare best-paralog (Astral III) and all-paralog (Astral-pro) trees (RF and SPR distances) 
+
+```{r}
+
+# Read trees
+tre<-read.tree("Calypsoinae_astral_wo_and_w_paralogs.tre")
+
+# Root the second tree (was not rooted)
+tre3 <-root(tre,outgroup = "fastp-Brassavola-glauca_S40",resolve.root = TRUE)
+is.rooted(tre3)
+TRUE TRUE
+
+# separate out trees from multiphylo to phylo objects, ladderize the second one which wasn't ladderized
+noparalogs <- tre3[[1]]
+paralogs <- tre3[[2]]
+para2<-ladderize(paralogs, right = FALSE)
+
+# Calculate Robinson-Foulds and SPR distance
+RF.dist(noparalogs,para2)
+[1] 1
+
+SPR.dist(noparalogs,para2)
+
+spr 
+  1 
+  
+# Basically, one SPR rearrangement is needed to get from one tree to the next (placement of Corallorhiza bulbosa)
+
+```
+
+### Plotting IQtree gCF, gDF1, gDF2, and gDFP as pie charts in R
+
+```{r}
+library(phytools)
+library(tidytree)
+library(dplyr)
+library(ggtree)
+library(ggimage)
+
+### Read in tree
+tre <- read.tree("bestparalog_astral.tre")
+
+### convert to tibble format
+x <- as_tibble(tre)
+
+### rename column for "parent" node to "ID" so it matches the node data tibble
+x2 <- x %>% rename(ID = parent)
+
+### Merge the tree and node data
+y <- full_join(x2, e, by = 'ID')
+
+### Create pie charts, selecting the columns for gCF, gDF1, gDF2, and gDFP
+pies <- nodepie(y, cols = c(5,7,9,11))
+
+### Plot the base tree
+p <- ggtree(tre) + geom_tiplab() 
+
+### Add the node pie charts
+p2 <- p + geom_inset(pies, width = .05, height = .05) 
+
+### This is kind of ugly, but it works!. Export pdf, edit colors etc. in Adobe Illustrator.
+
+```
+
+
+
+````bash
+
+conda activate hybpiper
+mkdir newtargets2
+
+while read name; 
+ 
+do hybpiper assemble -t_dna ../orchids_targetfile.fasta -r ../fastp_polyg/$name*.fastq.gz --prefix $name --bwa; 
+ 
+done < ../namelist3.txt
+
+
+hybpiper stats -t_dna ../orchids_targetfile.fasta gene ../namelist3.txt
+
+hybpiper recovery_heatmap seq_lengths.tsv --heatmap_filetype pdf
+
+hybpiper retrieve_sequences dna -t_dna ../orchids_targetfile.fasta --sample_names ../namelist3.txt --fasta_dir best_paralog_unaligned
+
+
+## Compare original target gene recovery vs newtargets in R1
+## Combine the data either in excel or in R
+
+```{r}
+
+hyb <- read.csv("hybpiper_stats.csv",header=T)
+
+ggplot(hyb, aes(x=Name)) + 
+    geom_point(aes(y = GenesWithSeqs), color = "red", size=3) + 
+    geom_point(aes(y = GenesWithSeqs_newtargets), color="blue", size=3) + coord_flip()
+
+```
+
+rename 's/.fasta/.FNA/g' *.fasta
+
+for i in *.FNA; do
+mafft --adjustdirection --thread 32 ${i} > ${i%.*}_mafft.fasta;
+done
+
+sed -i 's/_R_//g' *_mafft.fasta
+
+
+## Trim alignments, but first convert 'n' to '-'
+
+sudo rm -r *.FNA
+
+parallel seqkit -is replace -p "n" -r "-" {} -o {.}_seqkit.fasta ::: *.fasta 
+
+sudo rm -r *_mafft.fasta
+
+parallel trimal -in {} -out {.}_trim.fasta -automated1 ::: *_seqkit.fasta
+
+sudo rm -r *_seqkit.fasta
+
+mkdir ../trimmed_aligned_allparalogs
+
+sudo mv *_seqkit_trim.fasta ../trimmed_aligned_allparalogs
+cd ..
+
+iqtree2 -S trimmed_aligned_bestparalog --prefix iqtree_bestparalog -B 1000 -m GTR+G+I -T 32
+
+python3 /usr/local/src/TreeShrink-1.3.8b/run_treeshrink.py -t iqtree_bestparalog.treefile > treeshrink_bestparalog.log
+
+
+## Alignment-free tree with waster
+
+C:\Analysis\ASTER-Windows\exe\waster-site.exe -t 16 -i wcaster.txt -o waster_test_calyps 2>LOG_FILE
+
+## PAralogs
+
+namelist3.txt
+
+cd newtargets_2024_03_22
+
+conda activate hybpiper 
+
+hybpiper paralog_retriever ../namelist3.txt -t_dna ../orchids_targetfile.fasta
+
+rename 's/.fasta/.FNA/g' *.fasta
+
+for i in *.FNA; do
+mafft --adjustdirection --thread 32 ${i} > ${i%.*}_mafft.fasta;
+done
+
+sed -i 's/_R_//g' *_mafft.fasta
+
+
+## Trim alignments, but first convert 'n' to '-'
+
+sudo rm -r *.FNA
+
+parallel seqkit -is replace -p "n" -r "-" {} -o {.}_seqkit.fasta ::: *.fasta 
+
+sudo rm -r *_mafft.fasta
+
+parallel trimal -in {} -out {.}_trim.fasta -automated1 ::: *_seqkit.fasta
+
+sudo rm -r *_seqkit.fasta
+
+mkdir ../trimmed_aligned_allparalogs
+
+sudo mv *_seqkit_trim.fasta ../trimmed_aligned_paralogs
+cd ..
+
+iqtree2 -S trimmed_aligned_paralogs --prefix iqtree_paralogs -B 1000 -m GTR+G+I -T 32
+
+python3 /usr/local/src/TreeShrink-1.3.8b/run_treeshrink.py -t iqtree_bestparalog.treefile > treeshrink_bestparalog.log
+
+## gCF, sCF
+
+iqtree2 -t bestparalog_rerooted_astral.tre -s newtargets_concat_calyps.fasta --gcf bestparalog_rerooted.treefile --scf 10000 --prefix concord_bestparalog -T 28
+
+##############################
+
+## Download files from SRA for ourtgroup taxa (Epidendreae)
+
+```bash
+
+ERR5006136	Bletia_parkinsonii			fastq-dump --split-3 --outdir . ERR5006136	
+ERR5034643	Agrostophyllum_occidentale	fastq-dump --split-3 --outdir . ERR5034643	
+ERR7622556	Corallorhiza_ekmanii		fastq-dump --split-3 --outdir . ERR7622556	
+ERR7622567	Govenia_utriculata			fastq-dump --split-3 --outdir . ERR7622567	
+ERR5033238	Coelia_triptera				fastq-dump --split-3 --outdir . ERR5033238	
+ERR5006143	Calypso_bulbosa				fastq-dump --split-3 --outdir . ERR5006143	
+SRR13390767	Coelia_bella				fastq-dump --split-3 --outdir . SRR13390767	
+SRR26876907	Laelia_rubescens			fastq-dump --split-3 --outdir . SRR26876907	
+SRR26767232	Epidendrum_rivulare			fastq-dump --split-3 --outdir . SRR26767232	
+SRR26876836	Stelis_imraei				fastq-dump --split-3 --outdir . SRR26876836	
+ERR7622603	Isochilus_linearis			fastq-dump --split-3 --outdir . ERR7622603	
+ERR5006147	Coelogyne_cristata			fastq-dump --split-3 --outdir . ERR5006147	
+
+```
+fastp-Agrostophyllum_occidentale 
+fastp-Bletia_parkinsonii 
+fastp-Calypso_bulbosa 
+fastp-Coelia_triptera 
+fastp-Coelogyne_cristata 
+fastp-Corallorhiza_ekmanii 
+fastp-Epidendrum_rivulare 
+fastp-Govenia_utriculata 
+fastp-Isochilus_linearis 
+fastp-Stelis_imraei
+ 
+## Sensitivity analysis based on datasets with min # taxa represented (40, 30, 20, 10)
+
+```bash
+
+nohup iqtree2 -S min40 --prefix min40_iqtree_bestparalog -B 1000 -m GTR+G+I -T 32 &
+nohup iqtree2 -S min30 --prefix min30_iqtree_bestparalog -B 1000 -m GTR+G+I -T 32 &
+nohup iqtree2 -S min20 --prefix min20_iqtree_bestparalog -B 1000 -m GTR+G+I -T 32 &
+
+# Number of of gene trees:
+# 105 for min 40
+# 180 for min 30
+# 226 for min 20
+# 272 for min 10
+
+conda activate treeshrink 
+
+python3 /usr/local/src/TreeShrink-1.3.8b/run_treeshrink.py -t min40_iqtree_bestparalog.treefile -O min40_iqtree_bestparalog_shrunk.tre > min40_iqtree_bestparalog.log
+python3 /usr/local/src/TreeShrink-1.3.8b/run_treeshrink.py -t min30_iqtree_bestparalog.treefile -O min30_iqtree_bestparalog_shrunk.tre > min30_iqtree_bestparalog.log
+python3 /usr/local/src/TreeShrink-1.3.8b/run_treeshrink.py -t min20_iqtree_bestparalog.treefile -O min20_iqtree_bestparalog_shrunk.tre > min20_iqtree_bestparalog.log
+
+```
+
+## MDS on Robinson-Foulds distances to compare trees
+
+```{r}
+
+library(phangorn)
+library(phytools)
+
+trees<-read.tree("alltrees.tre")
+
+RF.dist(trees)
+
+    1  2  3  4  5  6  7  8  9 10 11 12 13 14 15 16 17
+2  10                                                
+3   4  8                                             
+4   8  8 10                                          
+5   8  6  6  4                                       
+6   8  8  4  6  2                                    
+7   8  4  6  4  4  6                                 
+8   4  6  4  8  4  4  4                              
+9   6  6  2  8  4  2  4  2                           
+10 14 12 12 14 14 16 10 14 14                        
+11 14 12 12 14 14 16 10 14 14  0                     
+12 12 12 12 18 16 16 14 12 14  4  4                  
+13 12  8 10  6  6  8  4  8  8 14 14 18               
+14 12  8 10  6  6  8  4  8  8 14 14 18  0            
+15 12  8 10  6  6  8  4  8  8 14 14 18  0  0         
+16 12 10  8  6  6  4  6  8  6 16 16 18  8  8  8      
+17 12 10  8  6  6  4  6  8  6 16 16 18  8  8  8  0   
+18 12 10  8  6  6  4  6  8  6 16 16 18  8  8  8  0  0
+
+mat <- RF.dist(trees)
+
+mat2<-as.matrix(mat)
+
+fit <- cmdscale(mat2, eig = TRUE, k = 2)
+
+fit
+$points
+         [,1]       [,2]
+1   1.6751726  5.9327902
+2   1.1554116 -0.2366668
+3   0.9988213  4.2050207
+4  -3.5354265 -1.8252624
+5  -2.8224617  0.6374570
+6  -3.9610035  3.3667640
+7  -0.2532618 -1.8609021
+8  -0.5045293  3.7389841
+9  -1.5926255  3.2939012
+10 10.3882121 -3.8547222
+11 10.3882121 -3.8547222
+12 13.0627847  3.1015140
+13 -3.3302248 -4.4253714
+14 -3.3302248 -4.4253714
+15 -3.3302248 -4.4253714
+16 -5.0028772  0.2106529
+17 -5.0028772  0.2106529
+18 -5.0028772  0.2106529
+
+$eig
+ [1]  5.389728e+02  1.945240e+02  9.410307e+01  5.144017e+01  3.097192e+01  1.008112e+01  6.838713e+00
+ [8]  6.394885e-14  2.685985e-16  0.000000e+00 -8.421806e-18 -1.073085e-15 -1.753353e-14 -2.171088e+00
+[15] -5.721049e+00 -1.005602e+01 -2.477783e+01 -5.287251e+01
+
+$x
+NULL
+
+$ac
+[1] 0
+
+$GOF
+[1] 0.7173350 0.7913169
+
+x <- fit$points[, 1]
+y <- fit$points[, 2]
+plot(x, y, pch = 19, xlim = range(x) + c(0, 600))
+plot(x, y, pch = 19)
+
+text(x, y, pos = 4, labels = city.names)
+
+names <- 
+c("GTRGI-min20","GTRGI-min30","GTRGI-min40","asteroid-min20","asteroid-min30","asteroid-min40","astral-min20","astral-min30","astral-min40","astral-noshrink-min20","astral-noshrink-min30","astral-noshrink-min40","caster-min20","caster-min30","caster-min40","casterbl-min20","casterbl-min30","casterbl-min40")
+
+plot(x, y, pch = 19)
+
+text(x, y, pos = 4, labels = city.names)
+
+df <- data.frame(names,x,y)
+df
+              city.names          x          y
+1            GTRGI-min20  1.6751726  5.9327902
+2            GTRGI-min30  1.1554116 -0.2366668
+3            GTRGI-min40  0.9988213  4.2050207
+4         asteroid-min20 -3.5354265 -1.8252624
+5         asteroid-min30 -2.8224617  0.6374570
+6         asteroid-min40 -3.9610035  3.3667640
+7           astral-min20 -0.2532618 -1.8609021
+8           astral-min30 -0.5045293  3.7389841
+9           astral-min40 -1.5926255  3.2939012
+10 astral-noshrink-min20 10.3882121 -3.8547222
+11 astral-noshrink-min30 10.3882121 -3.8547222
+12 astral-noshrink-min40 13.0627847  3.1015140
+13          caster-min20 -3.3302248 -4.4253714
+14          caster-min30 -3.3302248 -4.4253714
+15          caster-min40 -3.3302248 -4.4253714
+16        casterbl-min20 -5.0028772  0.2106529
+17        casterbl-min30 -5.0028772  0.2106529
+18        casterbl-min40 -5.0028772  0.2106529
+
+write.csv(df,file="rfdist_mds_trees.calyps.csv")
+
+## edited the csv file io indicate analysis and dataset
+
+dat <- read.csv("rfdist_mds_trees.calyps.csv",header=T)
+dat
+
+    X            city.names          x          y            analysis dataset
+1   1           GTRGI-min20  1.6751726  5.9327902               GTRGI   min20
+2   2           GTRGI-min30  1.1554116 -0.2366668               GTRGI   min30
+3   3           GTRGI-min40  0.9988213  4.2050207               GTRGI   min40
+4   4        asteroid-min20 -3.5354265 -1.8252624            Asteroid   min20
+5   5        asteroid-min30 -2.8224617  0.6374570            Asteroid   min30
+6   6        asteroid-min40 -3.9610035  3.3667640            Asteroid   min40
+7   7          astral-min20 -0.2532618 -1.8609021   Astral-treeshrink   min20
+8   8          astral-min30 -0.5045293  3.7389841   Astral-treeshrink   min30
+9   9          astral-min40 -1.5926255  3.2939012   Astral-treeshrink   min40
+10 10 astral-noshrink-min20 10.3882121 -3.8547222 Astral-notreeshrink   min20
+11 11 astral-noshrink-min30 10.3882121 -3.8547222 Astral-notreeshrink   min30
+12 12 astral-noshrink-min40 13.0627847  3.1015140 Astral-notreeshrink   min40
+13 13          caster-min20 -3.3302248 -4.4253714         Caster-site   min20
+14 14          caster-min30 -3.3302248 -4.4253714         Caster-site   min30
+15 15          caster-min40 -3.3302248 -4.4253714         Caster-site   min40
+16 16        casterbl-min20 -5.0028772  0.2106529      Caster-site-BL   min20
+17 17        casterbl-min30 -5.0028772  0.2106529      Caster-site-BL   min30
+18 18        casterbl-min40 -5.0028772  0.2106529      Caster-site-BL   min40
+
+library(ggplot2)
+
+ggplot(dat, aes(x=x, y=y, shape=dataset, color=analysis, size=4)) +
+    geom_point()
+
+```
+
+
+
