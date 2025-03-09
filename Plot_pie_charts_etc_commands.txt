@@ -1,0 +1,293 @@
+
+## Iqtree2 command with UFBoot
+nohup iqtree2 -S [folder with alignments] -m GTR+G+I -T 32 -B 1000 --prefix [output treefile name &
+
+# e.g.
+nohup iqtree2 -S filtered -m GTR+G+I --ninit 10 -T 90 -B 1000 --prefix filtered_GTR_genetrees &
+
+# output will be called 'filtered_GTR_genetrees.treefile'
+
+conda activate /home/cbarrett/.conda/envs/aster
+
+# Weighted ASTRAL
+wastral -i filtered_GTR_genetrees.treefile -o filtered_GTR_genetrees.tre -u 2
+
+## The '-u2' = verbose branch annotations
+
+
+
+### Load libraries
+
+if (!require(ape)) install.packages("ape", dependencies = TRUE); library(ape)
+if (!require(phytools)) install.packages("phytools", dependencies = TRUE); library(phytools)
+if (!require(gtools)) install.packages("gtools", dependencies = TRUE); library(gtools)
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("ggtree")
+if (!require(cowplot)) install.packages("cowplot", dependencies = TRUE); library(cowplot)
+if (!require(ggimage)) install.packages("ggimage", dependencies = TRUE); library(ggimage)
+if (!require(treeio)) install.packages("treeio", dependencies = TRUE); library(treeio)
+if (!require(gridExtra)) install.packages("gridExtra", dependencies = TRUE); library(gridExtra)
+
+# Or if already installed
+library(ape)
+library(phytools)
+library(gtools)
+library(ggtree)
+library(cowplot)
+library(ggimage)
+library(treeio)
+library(gridExtra)
+library(dplyr)
+
+### Read in ASTRAL formatted tree with annotations (-u 2 option in ASTRAL for verbose output)
+# AS_0all <- read.astral("prank_filtered_GT_verbose_rerooted.tre")
+AS_0all <- read.astral("mixall_pranks_verbose_rooted.tre")
+p_0all <- ggtree(AS_0all@phylo, ladderize=T, branch.length = "none") + geom_tiplab(size=3.5, hjust= -0.05) + xlim_tree(70)
+write(AS_0all@phylo$tip.label, file= "CDS_alM_r_g_c0all_trees_BP10_SpeciesTree_annotQ_rooted2_tips.txt")
+
+### Build a data frame for plotting q-values (3)
+### Cite Sidonie's R code: https://github.com/sidonieB/scripts/blob/master/plot_Astral_trees_v2.R
+
+QS_calc <- function(AS_A) {
+  Q1 <- as.numeric(AS_A@data$q1) * 100
+  Q <- as.data.frame(Q1)
+  Q$Q2 <- as.numeric(AS_A@data$q2) * 100
+  Q$Q3 <- as.numeric(AS_A@data$q3) * 100
+  Q$node <- AS_A@data$node
+  return(Q)
+}
+
+
+# Function to build a data frame for plotting f-values plus uninformative GTs (like phyparts)
+QS2_calc <- function(AS_A) {
+  Q1 <- as.numeric(AS_A@data$f1 / 318)
+  Q <- as.data.frame(Q1)
+  Q$Q2 <- as.numeric(AS_A@data$f2 / 318)
+  Q$Q3 <- as.numeric(AS_A@data$f3 / 318)
+  Q$Q4 <- (1 - (Q$Q1 + Q$Q2 + Q$Q3)) 
+  Q$node <- AS_A@data$node
+  return(Q)
+}
+
+
+# Run the function
+Q_0all <- QS2_calc(AS_0all)
+
+# Build node pies
+pies_0all <- nodepie(Q_0all, cols=1:4, color=c(Q1='blue', Q2='red', Q3='orange', Q4='gray')) #, alpha=.6) # change style as needed, alpha is for transparency
+
+# Create ggtree object with pie charts
+p2_0all <- inset(p_0all, pies_0all, width=0.03, height=0.03)#, hjust=-.6) # change size if pies too big/small (better check first how it looks in the exported file)
+# plot figure
+p2_0all
+
+
+### Add f1 (concordant) and f2+3 (discordant) gene tree numbers per node
+p3 <- p2_0all %<+% Q_0all # adds a data frame to a ggtree object (operator = %<+%)
+
+p3$data$Q1 # includes NA values for tips!
+
+### Convert proportions to gene trees, rounded to integer
+
+# Concordant GTs
+p3$data <- p3$data %>%
+	mutate(Q1_transformed = round(Q1 * 318))
+
+# Sum of two other discordant quartet in gene trees
+p3$data <- p3$data %>%
+	mutate(Q23_transformed = round((Q2 + Q3) * 318))
+
+### PLOT! May have to adjust sizes and "nudge" parameters
+
+p4 <- p3 + 
+    geom_nodelab(aes(label = Q1_transformed), 
+                 nudge_x = -0.5, 
+                 nudge_y = 0.25, 
+                 size = 3)  +
+    
+    geom_nodelab(aes(label = Q23_transformed), 
+                 nudge_x = -0.5,
+                 nudge_y = -0.25,
+                 size = 3)
+p4
+
+## may need to re-plot
+p4
+
+
+######################
+
+# R code to plot gene tree number next to tree
+
+# Load required libraries
+library(ape)
+library(ggtree)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# Read the species tree
+species_tree <- read.tree("filtered_GTR_genetrees_clean.newick")
+
+# Read the gene trees
+gene_trees <- read.tree("filtered_GTR_genetrees.treefile")
+
+# Count how many times each taxon appears across all gene trees
+taxon_counts <- table(unlist(lapply(gene_trees, function(tree) tree$tip.label)))
+
+# Convert taxon counts into a dataframe for plotting
+taxon_data <- data.frame(
+    label = names(taxon_counts),  # 'label' must match ggtree's tip labels
+    count = as.numeric(taxon_counts)
+)
+
+# Ensure taxa in species tree are included, filling missing ones with 0
+taxon_data <- right_join(data.frame(label = species_tree$tip.label), taxon_data, by = "label") %>%
+    tidyr::replace_na(list(count = 0))
+
+# Ensure labels are treated as discrete values & ordered to match the tree
+taxon_data$label <- factor(taxon_data$label, levels = rev(species_tree$tip.label)) 
+
+# Create ggtree plot with extra space for labels
+p_tree <- ggtree(species_tree) +
+    geom_tiplab(size = 4, align = TRUE, linetype = "dotted") +  # Make labels larger
+    xlim(0, max(taxon_data$count) + 5) +  # Extend x-axis for labels
+    theme_minimal()
+
+# Align bar plot with tree using facet_plot()
+p <- facet_plot(p_tree, panel = "Gene Tree Counts", data = taxon_data,
+                geom = geom_col, aes(x = count, y = label), fill = "steelblue") +
+     scale_y_discrete() +  # Fix discrete y-axis issue
+     theme(strip.text = element_text(size = 12, face = "bold"),
+           axis.text.y = element_blank(),  # Remove redundant taxon names
+           axis.ticks.y = element_blank())  # Remove y-axis ticks
+
+# Show plot
+print(p)
+
+
+###########################
+
+R code to subsample ten taxa for analysis with phylonetworks
+
+
+# Load required libraries
+library(ape)
+
+# Define the taxa to keep
+keep_taxa <- c(
+  "fastp-Acmella_poliolepidica_S17_L001",
+  "fastp-Echinacea_serotina_S32_L001",
+  "fastp-Helianthus_decapetalus_S44_L001",
+  "fastp-Heliopsis_anomala_S37_L001",
+  "fastp-Heliopsis_lanceolata_S45_L001",
+  "fastp-Sanvitalia_fruticosa_PC_S68_L001",
+  "fastp-Spilanthes_urens_S79_L001",
+  "fastp-Zinnia_acerosa_S86_L001",
+  "fastp-Zinnia_littoralis_S101_L001",
+  "fastp-Zinnia_elegans_S94_L001"
+)
+
+# File paths
+species_tree_file <- "pnetw_filtered_species_tree.tre"
+gene_trees_file <- "filtered_GTR_genetrees.treefile"
+
+# Read the species tree and filter it
+species_tree <- read.tree(species_tree_file)
+species_tree <- drop.tip(species_tree, setdiff(species_tree$tip.label, keep_taxa))
+
+# Save the filtered species tree
+write.tree(species_tree, file = "filtered_species_tree.tre")
+
+# Read the gene trees
+gene_trees <- read.tree(gene_trees_file)
+
+# Function to filter taxa in each tree
+filter_tree <- function(tree, taxa) {
+  tree <- drop.tip(tree, setdiff(tree$tip.label, taxa))  # Drop unwanted taxa
+  if (length(tree$tip.label) >= 4) return(tree) else return(NULL)  # Keep only if ≥4 taxa
+}
+
+# Apply filtering to all gene trees
+filtered_trees <- lapply(gene_trees, filter_tree, taxa = keep_taxa)
+filtered_trees <- Filter(Negate(is.null), filtered_trees)  # Remove NULLs
+
+# Save the filtered gene trees
+write.tree(filtered_trees, file = "filtered_gene_trees.tre")
+
+# Print summary
+cat("Retained", length(filtered_trees), "gene trees with at least 4 taxa.\n")
+
+
+### 597 gene trees retained
+
+###############################
+
+
+
+## 1. Start julia and add phylonetworks
+julia
+using PhyloNetworks, PhyloPlots, RCall, CSV
+
+## 1b. For multithreading/parallel jobs
+using Distributed
+addprocs(90)
+@everywhere using PhyloNetworks
+
+## 2. Read in gene trees, view tree #3
+
+genetrees = readMultiTopology("filtered_gene_trees.tre");
+genetrees[3]
+
+## 3. Load phyloplots and plot tree #3
+
+plot(genetrees[3]); # tree for 3rd gene
+
+## 4. Calculate quartet Concordance Factors
+q,t = countquartetsintrees(genetrees);
+
+## 5. Write CFs to a table to save and view
+
+
+df = writeTableCF(q,t)   # data frame with observed CFs: gene frequencies
+CSV.write("tableCF.csv", df); # to save the data frame to a file
+raxmlCF = readTableCF("tableCF.csv") # read in the file and produces a "DataCF" object
+less("tableCF.csv")
+
+# Keeping all quartets possible (10 choose 4 = 210)
+raxmlCF = readTrees2CF(genetrees, whichQ="rand", numQ=210, CFfile="tableCF10.txt")
+
+
+## 6. Get a starting tree -- in this case, the astral "species tree"
+astraltree = readTopology("pnetw_filtered_species_tree.tre")
+
+## 7. Run the analyses (may want to use screen to pop in and out of julia)
+
+net0 = snaq!(astraltree,raxmlCF, hmax=0, filename="net0", seed=1234);
+net1 = snaq!(net0, raxmlCF, hmax=1, filename="net1", seed=2345);
+net2 = snaq!(net1, raxmlCF, hmax=2, filename="net2", seed=3345);
+net3 = snaq!(net2, raxmlCF, hmax=3, filename="net3", seed=4345);
+net4 = snaq!(net3, raxmlCF, hmax=4, filename="net4", seed=5345);
+net5 = snaq!(net4, raxmlCF, hmax=5, filename="net5", seed=6345);
+net6 = snaq!(net5, raxmlCF, hmax=6, filename="net6", seed=7345);
+net7 = snaq!(net6, raxmlCF, hmax=7, filename="net7", seed=8345);
+net8 = snaq!(net7, raxmlCF, hmax=8, filename="net8", seed=9345);
+
+
+### Summarize the -lnL pseudolikelihood scores and plot to find plateau
+
+## plot the reticulation network with the best likelihood (the start of the plateau)
+
+plot(net1,showgamma=true,style=:majortree)
+
+## If needed or if possible, root the tre
+net1_rooted = rootatnode!(net1, "fastp-Helianthus_decapetalus_S44_L001")
+
+## Plot in R/julia
+imagefilename = "zinn_net1_rooted.pdf"
+
+R"pdf"(imagefilename, width=4, height=3) # starts image file
+R"par"(mar=[0,0,0,0]) # to reduce margins (no margins at all here)
+plot(net1_rooted, showgamma=true, style=:majortree); # network is plotted & sent to file
+R"dev.off()"; # wrap up and save image file
